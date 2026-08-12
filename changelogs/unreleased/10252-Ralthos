@@ -1,0 +1,1 @@
+Do not sign a DownloadRequest URL when the backup or restore is in a phase that has not written any artifacts yet

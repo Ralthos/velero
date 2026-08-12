@@ -132,11 +132,13 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// Update the expiration.
 		downloadRequest.Status.Expiration = &metav1.Time{Time: r.clock.Now().Add(persistence.DownloadURLTTL)}
 
-		if downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreLog ||
+		isRestoreTarget := downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreLog ||
 			downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreResults ||
 			downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreResourceList ||
 			downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreItemOperations ||
-			downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreVolumeInfo {
+			downloadRequest.Spec.Target.Kind == velerov1api.DownloadTargetKindRestoreVolumeInfo
+
+		if isRestoreTarget {
 			restore := &velerov1api.Restore{}
 			if err := r.client.Get(ctx, kbclient.ObjectKey{
 				Namespace: downloadRequest.Namespace,
@@ -149,6 +151,13 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				log.Warnf("fail to get restore for DownloadRequest %s. Retry later.", err.Error())
 				return ctrl.Result{}, errors.WithStack(err)
 			}
+
+			if restorePhaseHasNoArtifacts(restore.Status.Phase) {
+				log.Infof("Restore %q is in phase %q and has not written any artifacts, not signing a URL",
+					restore.Name, restore.Status.Phase)
+				return ctrl.Result{}, nil
+			}
+
 			backupName = restore.Spec.BackupName
 		}
 
@@ -163,6 +172,12 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 			log.Warnf("fail to get backup for DownloadRequest %s. Retry later.", err.Error())
 			return ctrl.Result{}, errors.WithStack(err)
+		}
+
+		if !isRestoreTarget && backupPhaseHasNoArtifacts(backup.Status.Phase) {
+			log.Infof("Backup %q is in phase %q and has not written any artifacts, not signing a URL",
+				backup.Name, backup.Status.Phase)
+			return ctrl.Result{}, nil
 		}
 
 		location := &velerov1api.BackupStorageLocation{}
@@ -235,4 +250,33 @@ func (r *downloadRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&velerov1api.DownloadRequest{}).
 		WatchesRawSource(downloadRequestSource).
 		Complete(r)
+}
+
+// backupPhaseHasNoArtifacts reports whether a backup in this phase is known to have
+// written nothing to object storage yet, so no DownloadTargetKind can exist for it.
+//
+// Only pre-execution phases are listed. InProgress and everything after it may have a
+// partial log or other artifacts, and Deleting may still have all of them, so those are
+// left alone: signing there preserves the behaviour callers have today.
+func backupPhaseHasNoArtifacts(phase velerov1api.BackupPhase) bool {
+	switch phase {
+	case velerov1api.BackupPhaseNew,
+		velerov1api.BackupPhaseQueued,
+		velerov1api.BackupPhaseReadyToStart,
+		velerov1api.BackupPhaseFailedValidation:
+		return true
+	default:
+		return false
+	}
+}
+
+// restorePhaseHasNoArtifacts is the same test for a restore.
+func restorePhaseHasNoArtifacts(phase velerov1api.RestorePhase) bool {
+	switch phase {
+	case velerov1api.RestorePhaseNew,
+		velerov1api.RestorePhaseFailedValidation:
+		return true
+	default:
+		return false
+	}
 }
