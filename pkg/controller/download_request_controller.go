@@ -257,7 +257,7 @@ func (r *downloadRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //
 // Only pre-execution phases are listed. InProgress and everything after it may have a
 // partial log or other artifacts, and Deleting may still have all of them, so those are
-// left alone: signing there preserves the behaviour callers have today.
+// left alone: signing there preserves the behavior callers have today.
 func backupPhaseHasNoArtifacts(phase velerov1api.BackupPhase) bool {
 	switch phase {
 	case velerov1api.BackupPhaseNew,

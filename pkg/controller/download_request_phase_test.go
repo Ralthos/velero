@@ -27,7 +27,7 @@ import (
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 )
 
-// Expectations are declared once and reused by both the behaviour tests and the coverage
+// Expectations are declared once and reused by both the behavior tests and the coverage
 // tests below, so a phase can only be tested by being classified here first.
 var backupPhaseExpectations = map[velerov1api.BackupPhase]bool{
 	// Pre-execution: nothing has been written for any target kind.
@@ -37,7 +37,7 @@ var backupPhaseExpectations = map[velerov1api.BackupPhase]bool{
 	velerov1api.BackupPhaseFailedValidation: true,
 
 	// From here on there may be a partial log or other artifacts, and Deleting may
-	// still have all of them, so these keep the behaviour callers have today.
+	// still have all of them, so these keep the behavior callers have today.
 	velerov1api.BackupPhaseInProgress:                                false,
 	velerov1api.BackupPhaseWaitingForPluginOperations:                false,
 	velerov1api.BackupPhaseWaitingForPluginOperationsPartiallyFailed: false,
