@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -153,8 +154,11 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 
 			if restorePhaseHasNoArtifacts(restore.Status.Phase) {
-				log.Infof("Restore %q is in phase %q and has not written any artifacts, not signing a URL",
+				msg := fmt.Sprintf("restore %q is in phase %q and has not written any artifacts",
 					restore.Name, restore.Status.Phase)
+				log.Infof("%s, not signing a URL", msg)
+				downloadRequest.Status.Phase = velerov1api.DownloadRequestPhaseFailed
+				downloadRequest.Status.Message = msg
 				return ctrl.Result{}, nil
 			}
 
@@ -175,8 +179,11 @@ func (r *downloadRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 
 		if !isRestoreTarget && backupPhaseHasNoArtifacts(backup.Status.Phase) {
-			log.Infof("Backup %q is in phase %q and has not written any artifacts, not signing a URL",
+			msg := fmt.Sprintf("backup %q is in phase %q and has not written any artifacts",
 				backup.Name, backup.Status.Phase)
+			log.Infof("%s, not signing a URL", msg)
+			downloadRequest.Status.Phase = velerov1api.DownloadRequestPhaseFailed
+			downloadRequest.Status.Message = msg
 			return ctrl.Result{}, nil
 		}
 

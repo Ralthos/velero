@@ -17,14 +17,27 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime"
+	testclocks "k8s.io/utils/clock/testing"
+	ctrl "sigs.k8s.io/controller-runtime"
+	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1crds "github.com/vmware-tanzu/velero/config/crd/v1/crds"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/builder"
+	persistencemocks "github.com/vmware-tanzu/velero/pkg/persistence/mocks"
+	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
+	pluginmocks "github.com/vmware-tanzu/velero/pkg/plugin/mocks"
+	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 )
 
 // Expectations are declared once and reused by both the behavior tests and the coverage
@@ -143,4 +156,122 @@ func statusPhaseEnum(t *testing.T, crdName string) []string {
 
 	t.Fatalf("CRD %q not found", crdName)
 	return nil
+}
+
+// The guard is only useful if a caller can tell why it fired. These reconcile a real
+// request against a fake client and assert on what a client would actually observe.
+func TestGuardSetsFailedPhaseWithReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetKind  velerov1api.DownloadTargetKind
+		backupPhase velerov1api.BackupPhase
+		wantPhase   velerov1api.DownloadRequestPhase
+		wantMessage string
+	}{
+		{
+			name:        "backup that never ran fails with the phase named",
+			targetKind:  velerov1api.DownloadTargetKindBackupLog,
+			backupPhase: velerov1api.BackupPhaseFailedValidation,
+			wantPhase:   velerov1api.DownloadRequestPhaseFailed,
+			wantMessage: `backup "a-backup" is in phase "FailedValidation" and has not written any artifacts`,
+		},
+		{
+			name:        "backup that ran is untouched by the guard",
+			targetKind:  velerov1api.DownloadTargetKindBackupLog,
+			backupPhase: velerov1api.BackupPhaseCompleted,
+			wantPhase:   velerov1api.DownloadRequestPhaseProcessed,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newDownloadRequestHarness(t, tc.targetKind, tc.backupPhase)
+			got := harness.reconcile(t)
+
+			assert.Equal(t, tc.wantPhase, got.Status.Phase)
+			assert.Equal(t, tc.wantMessage, got.Status.Message,
+				"the message is the only thing telling a caller why no URL arrived")
+
+			if tc.wantPhase == velerov1api.DownloadRequestPhaseFailed {
+				assert.Empty(t, got.Status.DownloadURL,
+					"a failed request must not carry a URL that would 404")
+			}
+		})
+	}
+}
+
+// A message is set only on failure. An empty message alongside Failed would put the CLI
+// back on its generic storage-location error, which is the thing this replaces.
+func TestFailedPhaseAlwaysCarriesAMessage(t *testing.T) {
+	harness := newDownloadRequestHarness(t,
+		velerov1api.DownloadTargetKindBackupLog, velerov1api.BackupPhaseNew)
+
+	got := harness.reconcile(t)
+
+	require.Equal(t, velerov1api.DownloadRequestPhaseFailed, got.Status.Phase)
+	assert.NotEmpty(t, got.Status.Message)
+}
+
+// downloadRequestHarness builds the smallest cluster a DownloadRequest reconcile needs:
+// the request, its backup, and a storage location whose store returns a URL.
+type downloadRequestHarness struct {
+	client  kbclient.Client
+	reqName string
+	r       *downloadRequestReconciler
+}
+
+func newDownloadRequestHarness(
+	t *testing.T,
+	kind velerov1api.DownloadTargetKind,
+	backupPhase velerov1api.BackupPhase,
+) *downloadRequestHarness {
+	t.Helper()
+
+	s := runtime.NewScheme()
+	require.NoError(t, velerov1api.AddToScheme(s))
+
+	backup := builder.ForBackup(velerov1api.DefaultNamespace, "a-backup").
+		StorageLocation("a-location").Phase(backupPhase).Result()
+	location := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "a-location").Result()
+	request := builder.ForDownloadRequest(velerov1api.DefaultNamespace, "a-request").
+		Target(kind, "a-backup").Result()
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(request, backup, location).Build()
+
+	store := &persistencemocks.BackupStore{}
+	store.On("GetDownloadURL", request.Spec.Target).Return("a-url", nil)
+
+	pluginManager := &pluginmocks.Manager{}
+	pluginManager.On("CleanupClients").Return(nil)
+
+	r := NewDownloadRequestReconciler(
+		c,
+		testclocks.NewFakeClock(time.Now()),
+		func(logrus.FieldLogger) clientmgmt.Manager { return pluginManager },
+		NewFakeObjectBackupStoreGetter(map[string]*persistencemocks.BackupStore{"a-location": store}),
+		velerotest.NewLogger(),
+		nil,
+		nil,
+	)
+
+	return &downloadRequestHarness{client: c, reqName: request.Name, r: r}
+}
+
+func (h *downloadRequestHarness) reconcile(t *testing.T) *velerov1api.DownloadRequest {
+	t.Helper()
+
+	_, err := h.r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: kbclient.ObjectKey{
+			Namespace: velerov1api.DefaultNamespace,
+			Name:      h.reqName,
+		},
+	})
+	require.NoError(t, err)
+
+	got := &velerov1api.DownloadRequest{}
+	require.NoError(t, h.client.Get(context.Background(), kbclient.ObjectKey{
+		Namespace: velerov1api.DefaultNamespace, Name: h.reqName,
+	}, got))
+	return got
 }
